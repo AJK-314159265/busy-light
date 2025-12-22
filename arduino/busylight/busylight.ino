@@ -16,7 +16,9 @@
     Heartbeat / status:
       - "PING"             replies "PONG" and resets heartbeat timer
       - "HBEN 0|1"         disable/enable heartbeat watchdog (auto-off on timeout)
-      - "HBTO <ms>"        set heartbeat timeout in milliseconds; min clamp = 500ms
+      - "HBEN?"            replies with the heartbeat watchdog disable/enable status
+      - "HBTO <ms>"        set heartbeat timeout in milliseconds; min clamp = 500ms; max clamp = 86400000ms (one day)
+      - "HBTO?"            replies with the heartbeat timeout in milliseconds;
       - "HBRST"            reset heartbeat timer to "now"
       - "STAT?"            prints "STAT <ok|timeout> RGB r g b"
 
@@ -54,6 +56,7 @@
 #include <ctype.h>   // toupper
 #include <string.h>  // strlen, strcmp, strncpy
 #include <stdlib.h>  // strtol, atoi, atol
+#include <EEPROM.h>
 
 // --- Workaround for Arduino's auto-prototype order ---
 class BusyLightApp;            // forward-declare the class so it's a known type
@@ -69,20 +72,21 @@ namespace cfg {
   constexpr uint32_t BAUD     = 115200;
 
   // Heartbeat defaults: enable auto-off and set a sensible timeout.
-  constexpr bool     HBEN_DEFAULT   = true;
-  constexpr uint32_t HBTO_DEFAULTMS = 25000UL; // 25 seconds works well with 10s PING interval
-
+  constexpr bool     HB_DEFAULT_ENABLED   = true;
+  constexpr uint32_t HB_DEFAULT_TIMEOUT_MS = 25000UL; // 25 seconds works well with 10s PING interval
+  constexpr uint32_t HB_MIN_TIMEOUT_MS = 500UL; // clamp to a safe 0.5s minimum
+  constexpr uint32_t HB_MAX_TIMEOUT_MS = 86400000UL; // One day (24*60*60*1000)
+  
   // WS2812 brightness (0..255). Host can scale brightness before sending RGB;
   // KSeep the pixel at full power here.
   constexpr uint8_t  BRIGHTNESS     = 255;
 }
 
-// ---------- Small utility types --------------
-struct Rgb {
-  uint8_t r;
-  uint8_t g;
-  uint8_t b;
-};
+namespace eeprom_cfg {
+  constexpr int      ADDR    = 0;        // EEPROM start address
+  constexpr uint16_t MAGIC   = 0xB11E;   // "B11E" = BusyLight-ish
+  constexpr uint8_t  VERSION = 1;
+}
 
 // ---------- Small utility functions ----------
 /* Returns true for standard whitespace characters used by our parser. */
@@ -155,6 +159,12 @@ public:
   }
 
 private:
+  struct Rgb {
+    uint8_t r;
+    uint8_t g;
+    uint8_t b;
+  };
+
   void showActual_() {
     strip_.setPixelColor(0, strip_.Color(actual_.r, actual_.g, actual_.b));
     strip_.show();
@@ -177,6 +187,7 @@ public:
 
   /* Start or restart the timer. Call once in setup(). */
   void begin() {
+    loadFromEeprom_();     // override defaults if valid
     reset();
   }
 
@@ -191,12 +202,32 @@ public:
     timedOut_ = false; }
 
   /* Enable/disable the watchdog at runtime (HBEN). */
-  void setEnabled(bool en) { enabled_ = en; }
+  void setEnabled(bool en){
+    if (enabled_ == en) return;
+    enabled_ = en;
+    if (!enabled_) timedOut_ = false;
+    saveToEeprom_();
+  }
   bool enabled() const { return enabled_; }
+  uint32_t timeoutMs() const { return timeoutMs_; }
 
   /* Configure timeout (HBTO). */
-  void setTimeout(uint32_t ms) { timeoutMs_ = ms; }
+  void setTimeout(uint32_t ms) {
+    if (ms < cfg::HB_MIN_TIMEOUT_MS) ms = cfg::HB_MIN_TIMEOUT_MS;
+    if (ms > cfg::HB_MAX_TIMEOUT_MS) ms = cfg::HB_MAX_TIMEOUT_MS;
+    if (timeoutMs_ == ms) return;
+    timeoutMs_ = ms;
+    saveToEeprom_();
+  }
   uint32_t timeout() const { return timeoutMs_; }
+
+  void resetToDefaultsAndPersist() {
+      enabled_   = cfg::HB_DEFAULT_ENABLED;
+      timeoutMs_ = cfg::HB_DEFAULT_TIMEOUT_MS;
+      timedOut_  = false;
+      lastPingMs_ = millis();
+      saveToEeprom_();
+    }
 
   /*
     Periodic update. Returns true exactly once when transition into "timed out".
@@ -216,6 +247,52 @@ public:
   bool isTimedOut() const { return timedOut_; }
 
 private:
+  struct Persist {
+    uint16_t magic;
+    uint8_t  version;
+    uint8_t  enabled;     // 0/1
+    uint32_t timeoutMs;   // heartbeat timeout
+    uint8_t  checksum;    // simple checksum
+  };
+
+  void loadFromEeprom_() {
+    Persist p{};
+    EEPROM.get(eeprom_cfg::ADDR, p);
+
+    if (p.magic != eeprom_cfg::MAGIC) return;
+    if (p.version != eeprom_cfg::VERSION) return;
+
+    const uint8_t cs = checksum(p);
+    if (cs != p.checksum) return;
+
+    enabled_ = (p.enabled != 0);
+    timeoutMs_ = p.timeoutMs;
+
+    if (timeoutMs_ < cfg::HB_MIN_TIMEOUT_MS) timeoutMs_ = cfg::HB_MIN_TIMEOUT_MS;
+  }
+
+  void saveToEeprom_() const {
+    Persist p{};
+    p.magic     = eeprom_cfg::MAGIC;
+    p.version   = eeprom_cfg::VERSION;
+    p.enabled   = enabled_ ? 1 : 0;
+    p.timeoutMs = timeoutMs_;
+    p.checksum  = checksum(p);
+
+    // EEPROM.put uses update semantics (only writes changed bytes)
+    EEPROM.put(eeprom_cfg::ADDR, p);
+  }
+
+  uint8_t checksum(const Persist& p) {
+    // Simple XOR checksum over all bytes except checksum itself
+    const uint8_t* b = reinterpret_cast<const uint8_t*>(&p);
+    uint8_t x = 0;
+    for (size_t i = 0; i < sizeof(Persist) - 1; ++i) {
+      x ^= b[i];
+    }
+    return x;
+  }
+
   bool     enabled_;
   uint32_t timeoutMs_;
   uint32_t lastPingMs_;
@@ -268,7 +345,7 @@ class BusyLightApp {
 public:
   BusyLightApp()
   : led_(cfg::NUM_LEDS, cfg::LED_PIN),
-    hb_(cfg::HBEN_DEFAULT, cfg::HBTO_DEFAULTMS) {}
+    hb_(cfg::HB_DEFAULT_ENABLED, cfg::HB_DEFAULT_TIMEOUT_MS) {}
 
   /* Initialize Serial, LED, heartbeat, and print a ready banner. */
   void begin() {
@@ -327,11 +404,20 @@ private:
     Serial.print(F("HBEN=")); Serial.println(hb_.enabled() ? 1 : 0);
   }
 
+  void cmdHBENQ() {
+    Serial.print("HBEN=");
+    Serial.println(hb_.enabled() ? 1 : 0);
+  }
+
   void cmdHBTO(const char* s) {
     long v = atol(s);
-    if (v < 500) v = 500;             // clamp to a safe 0.5s minimum
     hb_.setTimeout((uint32_t)v);
     Serial.print(F("HBTO=")); Serial.println(hb_.timeout());
+  }
+
+  void cmdHBTOQ() {
+    Serial.print("HBTO=");
+    Serial.println(hb_.timeoutMs());
   }
 
   void cmdHBRST() {
@@ -380,7 +466,9 @@ private:
     // ---- Heartbeat / status commands ----
     if (!strcmp(token, "PING"))  { if (hb_.isTimedOut()) {led_.restoreDesired();}; hb_.ping(); replyPong(); return; }
     if (!strcmp(token, "HBEN"))  { cmdHBEN(args); return; }
+    if (!strcmp(token, "HBEN?")) { cmdHBENQ(); return; }
     if (!strcmp(token, "HBTO"))  { cmdHBTO(args); return; }
+    if (!strcmp(token, "HBTO?")) { cmdHBTOQ(); return; }
     if (!strcmp(token, "HBRST")) { if (hb_.isTimedOut()) {led_.restoreDesired();}; cmdHBRST(); return; }
     if (!strcmp(token, "STAT?")) { cmdSTAT(); return; }
 
