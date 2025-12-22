@@ -77,6 +77,13 @@ namespace cfg {
   constexpr uint8_t  BRIGHTNESS     = 255;
 }
 
+// ---------- Small utility types --------------
+struct Rgb {
+  uint8_t r;
+  uint8_t g;
+  uint8_t b;
+};
+
 // ---------- Small utility functions ----------
 /* Returns true for standard whitespace characters used by our parser. */
 static inline bool isSpaceC(char c) {
@@ -97,20 +104,32 @@ class NeoPixelLed {
 public:
   /* Construct with number of LEDs and the data pin. Use GRB order @ 800kHz. */
   NeoPixelLed(uint16_t n, uint8_t pin)
-  : strip_(n, pin, NEO_GRB + NEO_KHZ800), r_(0), g_(0), b_(0) {}
+  : strip_(n, pin, NEO_GRB + NEO_KHZ800), desired_{0, 0, 0}, actual_{0, 0, 0} {}
 
   /* Initialize the NeoPixel, set brightness, and turn it off. */
   void begin() {
     strip_.begin();
     strip_.setBrightness(cfg::BRIGHTNESS);
-    setRGB(0,0,0);
+    showActual_();
+  }
+
+  // Force LED OFF due to heartbeat timeout without losing desired color.
+  void forceOff() {
+    actual_ = {0, 0, 0};
+    showActual_();
+  }
+
+  // Restore actual color to desired (used when heartbeat resumes).
+  void restoreDesired() {
+    actual_ = desired_;
+    showActual_();
   }
 
   /* Set the current color (0..255 per channel) and push to the LED. */
   void setRGB(uint8_t r, uint8_t g, uint8_t b) {
-    r_ = r; g_ = g; b_ = b;
-    strip_.setPixelColor(0, strip_.Color(r_, g_, b_));
-    strip_.show();
+    desired_ = {r, g, b};
+    actual_  = desired_;
+    showActual_();
   }
 
   /* Simple power-on blink: dim gray → off, so you know the firmware is running. */
@@ -132,13 +151,20 @@ public:
 
   /* Read back the last commanded RGB (what is on the LED). */
   void getRGB(uint8_t& r, uint8_t& g, uint8_t& b) const {
-    r = r_; g = g_; b = b_;
+    r = actual_.r; g = actual_.g; b = actual_.b;
   }
 
 private:
+  void showActual_() {
+    strip_.setPixelColor(0, strip_.Color(actual_.r, actual_.g, actual_.b));
+    strip_.show();
+  }
+
   Adafruit_NeoPixel strip_;
-  // To keep track of the last commanded color so STAT? can report it.
-  uint8_t r_, g_, b_;
+  // To keep track of the last desired color to restore actual color to desired (used when heartbeat resumes)
+  Rgb desired_{0, 0, 0};
+  // To keep track of the last commanded color so STAT? can report it. 
+  Rgb actual_{0, 0, 0}; 
 };
 
 // ---------- Heartbeat watchdog (auto-off when host stops pinging) ----------
@@ -151,18 +177,18 @@ public:
 
   /* Start or restart the timer. Call once in setup(). */
   void begin() {
-    lastPingMs_ = millis();
-    timedOut_ = false;
+    reset();
   }
 
   /* Call when a PING command is received; marks us as alive. */
   void ping() {
-    lastPingMs_ = millis();
-    timedOut_ = false;
+    reset();
   }
 
-  /* Reset is equivalent to begin(): timer restarts, not timed-out. */
-  void reset() { begin(); }
+  /* Reset: timer restarts, not timed-out. */
+  void reset() { 
+    lastPingMs_ = millis();
+    timedOut_ = false; }
 
   /* Enable/disable the watchdog at runtime (HBEN). */
   void setEnabled(bool en) { enabled_ = en; }
@@ -250,7 +276,7 @@ public:
     led_.begin();
     led_.bootBlink();   // quick visual check that firmware is alive
     hb_.begin();        // start heartbeat timer window now
-    Serial.println(F("NEOPIXEL BUSYLIGHT READY"));
+    Serial.println(F("BUSYLIGHT READY"));
   }
 
   /* Main loop: process serial input and heartbeat timeout. */
@@ -264,7 +290,7 @@ public:
     // 2) Heartbeat watchdog: auto-off when host stops pinging
     if (hb_.update()) {
       // Entered "timeout" state → turn LED off once.
-      led_.setRGB(0,0,0);
+      led_.forceOff();
       // Optional debug:
       // Serial.println(F("TIMEOUT"));
     }
@@ -309,7 +335,7 @@ private:
   }
 
   void cmdHBRST() {
-    hb_.reset();                      // same as begin() on the timer
+    hb_.reset();
     Serial.println(F("HBRST=OK"));
   }
 
@@ -352,10 +378,10 @@ private:
     while (*args && isSpaceC(*args)) args++;
 
     // ---- Heartbeat / status commands ----
-    if (!strcmp(token, "PING"))  { hb_.ping(); replyPong(); return; }
+    if (!strcmp(token, "PING"))  { if (hb_.isTimedOut()) {led_.restoreDesired();}; hb_.ping(); replyPong(); return; }
     if (!strcmp(token, "HBEN"))  { cmdHBEN(args); return; }
     if (!strcmp(token, "HBTO"))  { cmdHBTO(args); return; }
-    if (!strcmp(token, "HBRST")) { cmdHBRST(); return; }
+    if (!strcmp(token, "HBRST")) { if (hb_.isTimedOut()) {led_.restoreDesired();}; cmdHBRST(); return; }
     if (!strcmp(token, "STAT?")) { cmdSTAT(); return; }
 
     // ---- Test / simple control ----
