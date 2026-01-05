@@ -21,6 +21,7 @@
       - "HBTO?"            replies with the heartbeat timeout in milliseconds;
       - "HBRST"            reset heartbeat timer to "now"
       - "STAT?"            prints "STAT <ok|timeout> RGB r g b"
+      - "VER?"             replies with the version of the Arduino code
 
     Test:
       - "TEST"             cycles R→G→B→White→Off for quick verification
@@ -57,6 +58,9 @@
 #include <string.h>  // strlen, strcmp, strncpy
 #include <stdlib.h>  // strtol, atoi, atol
 #include <EEPROM.h>
+
+// Version string
+constexpr const char* VERSION = "1.0.0";
 
 // --- Workaround for Arduino's auto-prototype order ---
 class BusyLightApp;            // forward-declare the class so it's a known type
@@ -405,8 +409,7 @@ private:
   }
 
   void cmdHBENQ() {
-    Serial.print("HBEN=");
-    Serial.println(hb_.enabled() ? 1 : 0);
+    Serial.print("HBEN="); Serial.println(hb_.enabled() ? 1 : 0);
   }
 
   void cmdHBTO(const char* s) {
@@ -427,12 +430,18 @@ private:
 
   void cmdSTAT() {
     uint8_t r,g,b; led_.getRGB(r,g,b);
-    Serial.print(F("STAT "));
-    Serial.print(hb_.isTimedOut() ? F("timeout") : F("ok"));
-    Serial.print(F(" RGB "));
+    Serial.print(F("STAT="));
+    Serial.print(hb_.isTimedOut() ? F("TIMEOUT") : F("OK"));
+    Serial.print(F("; RGB="));
     Serial.print(r); Serial.print(' ');
     Serial.print(g); Serial.print(' ');
     Serial.println(b);
+  }
+
+  void cmdVERQ() {
+    Serial.print("VER="); Serial.print(VERSION);
+    Serial.print("; BUILD="); Serial.print(__DATE__);   // "Jan  5 2026"
+    Serial.print(" "); Serial.println(__TIME__); // "HH:MM:SS"
   }
 
   /*
@@ -471,6 +480,7 @@ private:
     if (!strcmp(token, "HBTO?")) { cmdHBTOQ(); return; }
     if (!strcmp(token, "HBRST")) { if (hb_.isTimedOut()) {led_.restoreDesired();}; cmdHBRST(); return; }
     if (!strcmp(token, "STAT?")) { cmdSTAT(); return; }
+    if (!strcmp(token, "VER?")) { cmdVERQ(); return; }
 
     // ---- Test / simple control ----
     if (!strcmp(token, "TEST"))  { led_.testPattern(); return; }
