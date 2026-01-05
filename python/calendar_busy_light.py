@@ -27,7 +27,7 @@ import serial  # pip install pyserial
 # -----------------------------------------------------------------------------
 # App / config paths
 # -----------------------------------------------------------------------------
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 APP_NAME = "CalendarBusyLight"
 CONFIG_BASENAME = "calendar_busy_light_config.json"
 
@@ -835,6 +835,7 @@ def run():
     state = {
         "ser": None,
         "next_serial_retry": 0.0,
+        "serial_needs_resync": True,  # force sending color after (re)connect
 
         # LED / color
         "last_color": (0, 0, 0),      # last sent RGB after brightness/fade
@@ -1385,6 +1386,7 @@ def run():
                 serial_status_text.set("Serial: disconnected (retrying...)")
             else:
                 serial_status_text.set(f"Serial: connected on {config.get('serial_port')}")
+                state["serial_needs_resync"] = True
 
         # Heartbeat
         if state["ser"] is not None and config.get("heartbeat_enabled", True):
@@ -1580,7 +1582,7 @@ def run():
                 progress_bar["value"] = 0
 
         # Push LED if color changed
-        if current_color != state["last_color"]:
+        if state.get("serial_needs_resync") or current_color != state["last_color"]:
             if config.get("log_color_changes", True):
                 print(f"[{now_dt.strftime('%H:%M:%S')}] Mode={mode_var.get()}, "
                       f"Status={state['current_status']}, RGB={current_color}, "
@@ -1598,6 +1600,7 @@ def run():
                 state["next_serial_retry"] = now_ts + config.get("serial_retry_seconds", 5)
                 serial_status_text.set("Serial: disconnected (retrying...)")
 
+            state["serial_needs_resync"] = False
             state["last_color"] = current_color
             preview_canvas.itemconfig(preview_circle, fill=rgb_to_hex(current_color))
 
