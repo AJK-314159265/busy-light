@@ -27,7 +27,7 @@ import serial  # pip install pyserial
 # -----------------------------------------------------------------------------
 # App / config paths
 # -----------------------------------------------------------------------------
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 APP_NAME = "CalendarBusyLight"
 CONFIG_BASENAME = "calendar_busy_light_config.json"
 
@@ -459,11 +459,11 @@ def apply_windows_taskbar_id(app_id: str = "com.myUniqueAppUserModelID"):
             pass
 
 # -----------------------------------------------------------------------------
-# Helpers to get currently available serial ports
+# Helpers serial ports
 # -----------------------------------------------------------------------------
 def scan_serial_ports() -> list[tuple[str, str]]:
     """Return [(device, label), ...] for available serial ports."""
-    ports = []
+    ports: list[tuple[str, str]] = []
     try:
         for p in list_ports.comports():
             desc = p.description or "USB Serial"
@@ -475,6 +475,142 @@ def scan_serial_ports() -> list[tuple[str, str]]:
     except Exception:
         pass
     return ports
+
+
+def _log(msg: str, logger=None, level: str = "info") -> None:
+    """Small logger/print shim."""
+    if logger is None:
+        print(msg)
+        return
+    fn = getattr(logger, level, logger.info)
+    fn(msg)
+
+
+def _probe_ping_pong(ser: serial.Serial, ping_timeout_s: float = 1.2, tries: int = 3) -> bool:
+    """
+    Verify this is our Busy Light by sending PING and expecting PONG.
+    Handles ATmega32U4 reset-on-open by trying a few times.
+    """
+    # Use a small blocking timeout *during probe* to simplify reading.
+    old_timeout = ser.timeout
+    ser.timeout = 0.25  # short blocking read for readline()
+
+    try:
+        # Flush anything the device prints on boot
+        try:
+            ser.reset_input_buffer()
+        except Exception:
+            pass
+
+        for _ in range(max(1, tries)):
+            # Send PING
+            try:
+                ser.write(b"PING\n")
+                ser.flush()
+            except Exception:
+                return False
+
+            deadline = time.time() + ping_timeout_s
+            while time.time() < deadline:
+                try:
+                    line = ser.readline()  # respects ser.timeout
+                except Exception:
+                    return False
+
+                if not line:
+                    continue
+
+                txt = line.decode("ascii", errors="ignore").strip().upper()
+                if "PONG" in txt:
+                    return True
+
+            # Small pause before retry (board might still be booting)
+            time.sleep(0.25)
+
+        return False
+    finally:
+        ser.timeout = old_timeout
+
+
+def _try_open_and_probe(port: str, baudrate: int, logger=None) -> Optional[serial.Serial]:
+    """Open a port and return the Serial object if it answers PING/PONG."""
+    try:
+        ser = serial.Serial(port, baudrate, timeout=0, write_timeout=1.0)  # runtime non-blocking
+    except Exception as e:
+        _log(f"Could not open {port}: {e}", logger, "debug")
+        return None
+
+    try:
+        # 32U4 boards often reset on open
+        time.sleep(1.2)
+
+        if _probe_ping_pong(ser, ping_timeout_s=1.2, tries=3):
+            return ser
+
+    except Exception as e:
+        _log(f"Probe failed on {port}: {e}", logger, "debug")
+
+    # Not the Busy Light
+    try:
+        ser.close()
+    except Exception:
+        pass
+    return None
+
+
+def open_serial_port(config: dict, logger=None) -> Optional[serial.Serial]:
+    """
+    Open serial port.
+    Strategy:
+      1) Try configured port first
+      2) If missing/fails, scan all available ports and probe with PING/PONG
+    """
+    if config.get("simulate", False):
+        _log("Simulation mode: not opening serial port.", logger)
+        return None
+
+    preferred = str(config.get("serial_port", "")).strip()
+    baudrate = int(config.get("baudrate", 115200))
+
+    # Build candidate list: preferred first, then all other available ports
+    available = [dev for dev, _label in scan_serial_ports()]
+    candidates: list[str] = []
+    if preferred:
+        candidates.append(preferred)
+    for dev in available:
+        if dev not in candidates:
+            candidates.append(dev)
+
+    if not candidates:
+        _log("No serial ports found.", logger, "warning")
+        return None
+
+    _log(f"Serial candidates: {candidates}", logger)
+
+    for dev in candidates:
+        _log(f"Trying {dev} ...", logger)
+        ser = _try_open_and_probe(dev, baudrate, logger=None)
+        if ser is not None:
+            _log(f"Busy Light connected on {dev} @ {baudrate}", logger)
+            # Keep track of where we actually connected (don’t force Settings selection)
+            config["active_serial_port"] = dev
+            return ser
+
+    _log("Busy Light not found (no PONG on any port).", logger, "warning")
+    return None
+
+
+def send_color(serial_port, r: int, g: int, b: int, config: dict) -> bool:
+    """
+    Send color command. Returns True if sent, False if port missing/broken.
+    """
+    if config.get("simulate", False) or serial_port is None:
+        return True
+
+    cmd = f"{r} {g} {b}\n"
+    serial_port.write(cmd.encode("ascii"))
+    serial_port.flush()
+
 
 # -----------------------------------------------------------------------------
 # Calendar via Outlook COM (local, no Graph/Azure)
@@ -663,31 +799,6 @@ def get_calendar_info(config: dict) -> tuple[str, Optional[Meeting], Optional[Me
         return "unknown", None, None
 
 # -----------------------------------------------------------------------------
-# Serial I/O
-# -----------------------------------------------------------------------------
-def open_serial_port(config: dict):
-    if config.get("simulate", False):
-        print("Simulation mode: not opening serial port.")
-        return None
-    port = config.get("serial_port", "COM1")
-    baudrate = int(config.get("baudrate", 115200))
-    try:
-        ser = serial.Serial(port, baudrate, timeout=0)  # non-blocking reads
-        time.sleep(2)  # Leonardo reset/enumerate
-        print(f"Serial connected on {port} at {baudrate} baud")
-        return ser
-    except Exception as e:
-        print(f"Could not open serial port {port}: {e}")
-        return None
-
-def send_color(serial_port, r: int, g: int, b: int, config: dict):
-    if config.get("simulate", False) or serial_port is None:
-        return
-    cmd = f"{r} {g} {b}\n"
-    serial_port.write(cmd.encode("ascii"))
-    serial_port.flush()
-
-# -----------------------------------------------------------------------------
 # Tooltips
 # -----------------------------------------------------------------------------
 class ToolTip:
@@ -835,6 +946,7 @@ def run():
     state = {
         "ser": None,
         "next_serial_retry": 0.0,
+        "serial_needs_resync": True,  # force sending color after (re)connect
 
         # LED / color
         "last_color": (0, 0, 0),      # last sent RGB after brightness/fade
@@ -1356,14 +1468,14 @@ def run():
     repo_link.grid(row=1, column=0, sticky="w", padx=8, pady=(0, 8))
     repo_link.bind("<Button-1>", lambda e: open_url("https://github.com/AJK-314159265/busy-light"))
 
-
     # ---------------- Serial init ----------------
     if not config.get("simulate", False):
         state["ser"] = open_serial_port(config)
         if state["ser"] is not None:
-            serial_status_text.set(f"Serial: connected on {config.get('serial_port')}")
+            active = config.get("active_serial_port") or config.get("serial_port", "")
+            serial_status_text.set(f"Serial: connected on {active}")
         else:
-            serial_status_text.set("Serial: disconnected (will retry)")
+            serial_status_text.set("Serial: disconnected (retrying...)")
             state["next_serial_retry"] = time.time() + config.get("serial_retry_seconds", 5)
     else:
         serial_status_text.set("Serial: simulation mode (no hardware)")
@@ -1385,6 +1497,7 @@ def run():
                 serial_status_text.set("Serial: disconnected (retrying...)")
             else:
                 serial_status_text.set(f"Serial: connected on {config.get('serial_port')}")
+                state["serial_needs_resync"] = True
 
         # Heartbeat
         if state["ser"] is not None and config.get("heartbeat_enabled", True):
@@ -1580,7 +1693,7 @@ def run():
                 progress_bar["value"] = 0
 
         # Push LED if color changed
-        if current_color != state["last_color"]:
+        if state.get("serial_needs_resync") or current_color != state["last_color"]:
             if config.get("log_color_changes", True):
                 print(f"[{now_dt.strftime('%H:%M:%S')}] Mode={mode_var.get()}, "
                       f"Status={state['current_status']}, RGB={current_color}, "
@@ -1598,6 +1711,7 @@ def run():
                 state["next_serial_retry"] = now_ts + config.get("serial_retry_seconds", 5)
                 serial_status_text.set("Serial: disconnected (retrying...)")
 
+            state["serial_needs_resync"] = False
             state["last_color"] = current_color
             preview_canvas.itemconfig(preview_circle, fill=rgb_to_hex(current_color))
 

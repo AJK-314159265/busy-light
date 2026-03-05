@@ -69,18 +69,21 @@ For information on the Hardware see: [../hardware/README.md](../hardware/README.
 
 ## Serial Protocol
 
-| Command     | Description                                  | Example         | Response            |
-|-------------|----------------------------------------------|-----------------|---------------------|
-| `R G B`     | Set color (0–255 per channel)                | `255 0 0`       | –                   |
-| `RGB r g b` | Same as above with `RGB` prefix              | `RGB 0 255 0`   | –                   |
-| `#RRGGBB`   | Hex color                                    | `#FF8000`       | –                   |
-| `OFF`       | Turn LED off                                 | `OFF`           | –                   |
-| `TEST`      | Cycle R→G→B→White→Off                        | `TEST`          | –                   |
-| `PING`      | Heartbeat ping                               | `PING`          | `PONG`              |
-| `HBEN 0/1`  | Disable/enable heartbeat watchdog            | `HBEN 1`        | `HBEN=1`            |
-| `HBTO <ms>` | Set heartbeat timeout (milliseconds)         | `HBTO 25000`    | `HBTO=25000`        |
-| `HBRST`     | Reset heartbeat timer                        | `HBRST`         | `HBRST=OK`          |
-| `STAT?`     | Report status & current RGB                  | `STAT?`         | `STAT ok RGB 0 0 0` |
+| Command     | Description                                     | Example         | Response                               |
+|-------------|-------------------------------------------------|-----------------|----------------------------------------|
+| `R G B`     | Set color (0–255 per channel)                   | `255 0 0`       | –                                      |
+| `RGB r g b` | Same as above with `RGB` prefix                 | `RGB 0 255 0`   | –                                      |
+| `#RRGGBB`   | Hex color                                       | `#FF8000`       | –                                      |
+| `OFF`       | Turn LED off                                    | `OFF`           | –                                      |
+| `TEST`      | Cycle R→G→B→White→Off                           | `TEST`          | –                                      |
+| `PING`      | Heartbeat ping                                  | `PING`          | `PONG`                                 |
+| `HBEN 0/1`  | Disable/enable heartbeat watchdog               | `HBEN 1`        | `HBEN=1`                               |
+| `HBEN?`     | Report heartbeat watchdog disable/enable status | `HBEN?`         | `HBEN=1`                               |
+| `HBTO <ms>` | Set heartbeat timeout (milliseconds)            | `HBTO 25000`    | `HBTO=25000`                           |
+| `HBRST`     | Reset heartbeat timer                           | `HBRST`         | `HBRST=OK`                             |
+| `STAT?`     | Report status & current RGB                     | `STAT?`         | `STAT=OK; RGB=0 0 0`                   |
+| `VER?`      | Report firmware version and build date/time     | `VER?`          | `VER=1.0.0; BUILD=2026-01-05 22:03:00` |
+
 
 **Behavior:**  
 If `HBEN` is on (default) and **no `PING`** arrives within `HBTO` ms, the LED is **forced OFF** until a new `PING` (or color command) is received.
